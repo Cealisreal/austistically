@@ -1,4 +1,10 @@
 node_modules/
+.vercel
+.env*.local
+
+# Leftover from local disk storage before the Vercel Blob rewrite -- no
+# longer read by the app, but left here in case you want them, and kept out
+# of git since they contain real uploaded photos/profile pictures.
 media/
 profiles/
 metadata.json

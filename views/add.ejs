@@ -10,27 +10,30 @@
   <%- include('partials/nav') %>
   <h1>Add Photos/Videos</h1>
   <p>Add new photos or videos to the gallery.</p>
-  <% if (error) { %>
-    <p class="error"><%= error %></p>
-  <% } %>
-  <form action="/add" method="POST" enctype="multipart/form-data" class="form-page">
+  <p id="status" class="error" hidden></p>
+  <form id="addForm" class="form-page">
     <input type="file" name="media" accept="image/*,video/*" id="mediaInput" required>
     <div id="preview" class="preview"></div>
     <input type="text" name="title" placeholder="Title (optional)">
     <input type="text" name="description" placeholder="Description (optional)">
     <button type="submit">Upload</button>
   </form>
-  <script>
-    var mediaInput = document.getElementById('mediaInput');
-    var preview = document.getElementById('preview');
+  <script type="module">
+    import { upload } from 'https://esm.sh/@vercel/blob@2.6.1/client';
+
+    const mediaInput = document.getElementById('mediaInput');
+    const preview = document.getElementById('preview');
+    const form = document.getElementById('addForm');
+    const status = document.getElementById('status');
+
     mediaInput.addEventListener('change', function () {
       preview.innerHTML = '';
-      var file = mediaInput.files[0];
+      const file = mediaInput.files[0];
       if (!file) {
         return;
       }
-      var url = URL.createObjectURL(file);
-      var el;
+      const url = URL.createObjectURL(file);
+      let el;
       if (file.type.indexOf('video/') === 0) {
         el = document.createElement('video');
         el.controls = true;
@@ -39,6 +42,51 @@
       }
       el.src = url;
       preview.appendChild(el);
+    });
+
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      const file = mediaInput.files[0];
+      if (!file) {
+        return;
+      }
+      const submitButton = form.querySelector('button[type="submit"]');
+      submitButton.disabled = true;
+      status.hidden = true;
+
+      try {
+        const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+        const pathname = 'media/' + Date.now() + '-' + safeName;
+
+        const blob = await upload(pathname, file, {
+          access: 'public',
+          handleUploadUrl: '/api/media-upload-token',
+          contentType: file.type,
+          multipart: true
+        });
+
+        const response = await fetch('/api/media', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: blob.url,
+            contentType: file.type,
+            title: form.title.value.trim(),
+            description: form.description.value.trim()
+          })
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(function () { return {}; });
+          throw new Error(data.error || 'Could not save the upload.');
+        }
+
+        window.location.href = '/';
+      } catch (err) {
+        status.textContent = err.message || 'Upload failed. Please try again.';
+        status.hidden = false;
+        submitButton.disabled = false;
+      }
     });
   </script>
 </body>

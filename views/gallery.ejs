@@ -37,8 +37,8 @@
           <% } %>
           <% if (item.canManage) { %>
             <div class="card-actions">
-              <a href="/edit/<%= encodeURIComponent(item.filename) %>">Edit</a>
-              <form action="/delete/<%= encodeURIComponent(item.filename) %>" method="POST" onsubmit="return confirm('Delete this item? This cannot be undone.');">
+              <a href="/edit/<%= item.id %>">Edit</a>
+              <form action="/delete/<%= item.id %>" method="POST" onsubmit="return confirm('Delete this item? This cannot be undone.');">
                 <button type="submit" class="delete-btn">Delete</button>
               </form>
             </div>

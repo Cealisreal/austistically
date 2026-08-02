@@ -10,15 +10,73 @@
   <%- include('partials/nav') %>
   <h1>My Profile</h1>
   <p>Signed in as <strong><%= currentMember %></strong>.</p>
-  <% if (pictureUrl) { %>
-    <div class="preview"><img src="<%= pictureUrl %>" alt="<%= currentMember %>"></div>
-  <% } %>
-  <% if (error) { %>
-    <p class="error"><%= error %></p>
-  <% } %>
-  <form action="/profile" method="POST" enctype="multipart/form-data" class="form-page">
-    <input type="file" name="picture" accept="image/*" required>
-    <button type="submit"><%= pictureUrl ? 'Change Picture' : 'Set Picture' %></button>
+  <div class="preview" id="preview">
+    <% if (pictureUrl) { %>
+      <img src="<%= pictureUrl %>" alt="<%= currentMember %>">
+    <% } %>
+  </div>
+  <p id="status" class="error" hidden></p>
+  <form id="profileForm" class="form-page">
+    <input type="file" name="picture" accept="image/*" id="pictureInput" required>
+    <button type="submit" id="submitButton"><%= pictureUrl ? 'Change Picture' : 'Set Picture' %></button>
   </form>
+  <script type="module">
+    import { upload } from 'https://esm.sh/@vercel/blob@2.6.1/client';
+
+    const pictureInput = document.getElementById('pictureInput');
+    const preview = document.getElementById('preview');
+    const form = document.getElementById('profileForm');
+    const status = document.getElementById('status');
+
+    pictureInput.addEventListener('change', function () {
+      const file = pictureInput.files[0];
+      if (!file) {
+        return;
+      }
+      preview.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(file);
+      preview.appendChild(img);
+    });
+
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      const file = pictureInput.files[0];
+      if (!file) {
+        return;
+      }
+      const submitButton = document.getElementById('submitButton');
+      submitButton.disabled = true;
+      status.hidden = true;
+
+      try {
+        const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+        const pathname = 'profiles/' + Date.now() + '-' + safeName;
+
+        const blob = await upload(pathname, file, {
+          access: 'public',
+          handleUploadUrl: '/api/profile-upload-token',
+          contentType: file.type
+        });
+
+        const response = await fetch('/api/profile-picture', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: blob.url })
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(function () { return {}; });
+          throw new Error(data.error || 'Could not save your picture.');
+        }
+
+        window.location.href = '/profile';
+      } catch (err) {
+        status.textContent = err.message || 'Upload failed. Please try again.';
+        status.hidden = false;
+        submitButton.disabled = false;
+      }
+    });
+  </script>
 </body>
 </html>

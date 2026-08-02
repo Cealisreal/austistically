@@ -3,68 +3,91 @@
 A simple photo/video gallery. Anyone with the link can view and add photos or
 videos; joining lets you get credit for what you add and set a profile picture.
 
-## Running it locally
+## How storage works
 
-```bash
-npm install
-npm start
-```
+This app is built for [Vercel](https://vercel.com). Vercel runs it as a
+serverless function with no persistent local disk, so nothing is stored on
+disk:
 
-Then open `http://localhost:3000`.
+- Photos, videos, and profile pictures upload **directly from the browser**
+  to [Vercel Blob](https://vercel.com/docs/vercel-blob) storage.
+- The gallery index and member list live in two small JSON files also stored
+  in Blob (`data/metadata.json`, `data/members.json`), read and rewritten on
+  each change.
 
-## Deploying so it's reachable from anywhere (not just your wifi)
+This means the app needs a Blob store to do anything beyond showing an empty
+gallery — see the deploy steps below.
 
-This app is ready to deploy to [Render](https://render.com) as a Web Service.
-Render was not free-tier friendly for this: **persistent disks (needed so your
-uploads survive redeploys) require a paid Render plan** — check
-[render.com/pricing](https://render.com/pricing) for current costs before you
-commit to this.
+## Deploying to Vercel
 
-### 1. Put the project on GitHub
+### 1. Import the project
 
-Render deploys from a GitHub repo. Run these yourself in this folder:
+1. Sign up / log in at [vercel.com](https://vercel.com) (signing in with your
+   GitHub account is easiest — it links them automatically).
+2. Click **Add New...** → **Project**, and import the
+   [Cealisreal/austistically](https://github.com/Cealisreal/austistically)
+   GitHub repo.
+3. Vercel auto-detects this as a Node/Express app — no build settings to
+   change. Click **Deploy**.
 
-```bash
-git init
-git add .
-git commit -m "Initial commit"
-```
+The first deploy will succeed, but the gallery page itself will show an error
+until you complete step 2 (there's no Blob store connected yet).
 
-Then create a new repository on [github.com/new](https://github.com/new) and
-follow GitHub's instructions to push this folder to it (it will show you the
-exact `git remote add` / `git push` commands for your new repo).
+### 2. Create a Blob store
 
-### 2. Create the Render Web Service
+1. In your new project's dashboard, open the **Storage** tab in the sidebar.
+2. Select **Create Database** → **Blob**.
+3. Set access to **Public** (this app has no passwords, so there's nothing
+   to gain from Private storage, and Public keeps the code simpler).
+4. Name it whatever you like and create it.
+5. On the **Projects** tab of the store, connect it to this project, including
+   the **Production**, **Preview**, and **Development** environments.
 
-1. Sign up / log in at [render.com](https://render.com).
-2. Click **New +** → **Web Service**, and connect the GitHub repo you just
-   pushed.
-3. Set:
-   - **Build Command**: `npm install`
-   - **Start Command**: `npm start`
-4. Pick a paid instance type (required for the persistent disk in the next
-   step).
+This automatically adds a `BLOB_READ_WRITE_TOKEN` environment variable (plus
+some OIDC variables) to your project.
 
-### 3. Add a persistent disk
+### 3. Redeploy
 
-In the Web Service's **Disks** settings, add a disk — e.g. mount path `/data`,
-size to taste (1GB is enough for a lot of photos; videos add up faster).
+Environment variable changes don't apply to deploys that already happened.
+Go to the project's **Deployments** tab and redeploy the latest one (or just
+push a new commit) so the Blob connection takes effect.
 
-### 4. Set environment variables
+Visit the URL Vercel gives you (`https://your-project.vercel.app`) — the
+gallery should now load and accept uploads.
 
-In the service's **Environment** settings, add:
+### 4. Optional: the owner override
+
+Add one more environment variable in **Settings** → **Environment
+Variables**:
 
 | Key | Value |
 |---|---|
-| `DATA_DIR` | `/data` (must match the disk's mount path from step 3) |
-| `OWNER_KEY` | *(optional)* a private secret you make up — see below |
+| `OWNER_KEY` | a private secret you make up |
 
-Render sets `PORT` automatically; you don't need to add it.
+See [Optional: owner override](#optional-owner-override) below for what it
+does. Redeploy after adding it, same as step 3.
 
-### 5. Deploy
+## Running it locally
 
-Render will build and deploy automatically. It gives you a public URL like
-`https://your-app-name.onrender.com` — that's what you share.
+Because uploads and data live in Blob storage, plain `node server.js` only
+half-works locally (pages load, but anything touching photos/members will
+error) unless it can see your Blob credentials. Use the Vercel CLI instead,
+which handles that automatically:
+
+```bash
+npm install -g vercel
+vercel login
+vercel link      # connects this folder to the Vercel project from step 1
+vercel env pull  # downloads BLOB_READ_WRITE_TOKEN into .env.local
+vercel dev       # runs the app locally with real Blob access
+```
+
+`vercel dev` also emulates the real Vercel Functions environment more
+closely than plain `node server.js` does, so it's the more accurate way to
+test changes before deploying.
+
+`.env.local` contains a real secret — it's already excluded via
+`.gitignore`, so don't remove that entry.
 
 ## Optional: owner override
 
@@ -75,10 +98,11 @@ this goes public, you have no way to remove something a stranger uploads
 under a name that isn't yours.
 
 To fix that, set the `OWNER_KEY` environment variable to a private secret
-only you know, then visit `https://your-app-url/owner?key=<that secret>`
-once, on your own device. That unlocks permanent edit/delete rights over
-*every* item, on that device, until you clear cookies. Don't share that URL —
-anyone who has it gets full control.
+only you know (see step 4 above), then visit
+`https://your-project.vercel.app/owner?key=<that secret>` once, on your own
+device. That unlocks permanent edit/delete rights over *every* item, on that
+device, until you clear cookies. Don't share that URL — anyone who has it
+gets full control.
 
 Leave `OWNER_KEY` unset and this feature does nothing (the `/owner` page
 404s).
