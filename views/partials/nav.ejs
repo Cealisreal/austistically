@@ -3,6 +3,9 @@
   <a href="/add">Add Photos/Videos</a>
   <a href="/members">Members</a>
   <span class="nav-spacer"></span>
+  <% if (isOwner) { %>
+    <span class="owner-badge" title="Owner mode is active on this device">Owner</span>
+  <% } %>
   <% if (currentMember) { %>
     <a href="/profile" class="nav-member">Hi, <%= currentMember %></a>
   <% } else { %>

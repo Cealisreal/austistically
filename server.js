@@ -280,11 +280,11 @@ function getLanIP() {
 app.get('/', async function (req, res) {
   const currentMember = req.cookies.memberName || null;
   const items = await getGalleryItems(currentMember, isSiteOwner(req));
-  res.render('gallery', { items: items, currentMember: currentMember, error: req.query.error || null });
+  res.render('gallery', { items: items, currentMember: currentMember, isOwner: isSiteOwner(req), error: req.query.error || null });
 });
 
 app.get('/add', function (req, res) {
-  res.render('add', { currentMember: req.cookies.memberName || null });
+  res.render('add', { currentMember: req.cookies.memberName || null, isOwner: isSiteOwner(req) });
 });
 
 // Called by the browser (see views/add.ejs) before it uploads a file
@@ -347,7 +347,8 @@ app.get('/edit/:id', async function (req, res) {
     type: entry.contentType && entry.contentType.indexOf('video/') === 0 ? 'video' : 'image',
     title: entry.title || '',
     description: entry.description || '',
-    currentMember: currentMember
+    currentMember: currentMember,
+    isOwner: isSiteOwner(req)
   });
 });
 
@@ -382,13 +383,13 @@ app.post('/delete/:id', async function (req, res) {
 });
 
 app.get('/join', function (req, res) {
-  res.render('join', { error: null, currentMember: req.cookies.memberName || null });
+  res.render('join', { error: null, currentMember: req.cookies.memberName || null, isOwner: isSiteOwner(req) });
 });
 
 app.post('/join', async function (req, res) {
   const name = (req.body.name || '').trim();
   if (!name) {
-    return res.render('join', { error: 'Please enter a name.', currentMember: req.cookies.memberName || null });
+    return res.render('join', { error: 'Please enter a name.', currentMember: req.cookies.memberName || null, isOwner: isSiteOwner(req) });
   }
   await addMember(name);
   res.cookie('memberName', name, { maxAge: MEMBER_COOKIE_MAX_AGE });
@@ -404,7 +405,7 @@ app.get('/members', async function (req, res) {
     .map(function (m) {
       return { name: m.name, pictureUrl: m.profilePicture || '' };
     });
-  res.render('members', { members: members, currentMember: req.cookies.memberName || null });
+  res.render('members', { members: members, currentMember: req.cookies.memberName || null, isOwner: isSiteOwner(req) });
 });
 
 app.get('/profile', async function (req, res) {
@@ -415,7 +416,8 @@ app.get('/profile', async function (req, res) {
   const member = await findMember(currentMember);
   res.render('profile', {
     currentMember: currentMember,
-    pictureUrl: member && member.profilePicture ? member.profilePicture : ''
+    pictureUrl: member && member.profilePicture ? member.profilePicture : '',
+    isOwner: isSiteOwner(req)
   });
 });
 

@@ -36,6 +36,17 @@ body {
   opacity: 0.85;
 }
 
+.owner-badge {
+  background: #e0a800;
+  color: #22223b;
+  font-weight: 700;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+}
+
 h1 {
   padding: 0 1.5rem;
 }
