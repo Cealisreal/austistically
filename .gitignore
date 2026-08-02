@@ -9,3 +9,6 @@ media/
 profiles/
 metadata.json
 members.json
+
+.vercel
+.env*

@@ -65,20 +65,37 @@
           multipart: true
         });
 
-        const response = await fetch('/api/media', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: blob.url,
-            contentType: file.type,
-            title: form.title.value.trim(),
-            description: form.description.value.trim()
-          })
-        });
-
-        if (!response.ok) {
+        // The gallery index is a shared file everyone's uploads write to, so
+        // two people saving at the exact same moment can occasionally
+        // collide and get a 500 back even though the server already retried
+        // internally. Retrying here a couple of times smooths over that
+        // rare case instead of showing the user an error for it.
+        let response;
+        let lastError;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt > 0) {
+            await new Promise(function (resolve) { setTimeout(resolve, 300 * attempt); });
+          }
+          response = await fetch('/api/media', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              url: blob.url,
+              contentType: file.type,
+              title: form.title.value.trim(),
+              description: form.description.value.trim()
+            })
+          });
+          if (response.ok) {
+            lastError = null;
+            break;
+          }
           const data = await response.json().catch(function () { return {}; });
-          throw new Error(data.error || 'Could not save the upload.');
+          lastError = data.error || 'Could not save the upload.';
+        }
+
+        if (lastError) {
+          throw new Error(lastError);
         }
 
         window.location.href = '/';

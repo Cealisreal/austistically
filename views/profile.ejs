@@ -59,15 +59,27 @@
           contentType: file.type
         });
 
-        const response = await fetch('/api/profile-picture', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: blob.url })
-        });
-
-        if (!response.ok) {
+        let response;
+        let lastError;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt > 0) {
+            await new Promise(function (resolve) { setTimeout(resolve, 300 * attempt); });
+          }
+          response = await fetch('/api/profile-picture', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: blob.url })
+          });
+          if (response.ok) {
+            lastError = null;
+            break;
+          }
           const data = await response.json().catch(function () { return {}; });
-          throw new Error(data.error || 'Could not save your picture.');
+          lastError = data.error || 'Could not save your picture.';
+        }
+
+        if (lastError) {
+          throw new Error(lastError);
         }
 
         window.location.href = '/profile';

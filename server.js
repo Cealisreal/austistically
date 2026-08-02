@@ -3,7 +3,7 @@ const cookieParser = require('cookie-parser');
 const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
-const { put, head, del, BlobNotFoundError } = require('@vercel/blob');
+const { put, head, del, list, BlobNotFoundError, BlobPreconditionFailedError } = require('@vercel/blob');
 const { handleUpload } = require('@vercel/blob/client');
 
 const app = express();
@@ -21,14 +21,17 @@ const MEDIA_CONTENT_TYPES = IMAGE_CONTENT_TYPES.concat(VIDEO_CONTENT_TYPES);
 const MAX_MEDIA_SIZE = 500 * 1024 * 1024; // 500MB, generous for phone videos
 const MAX_PROFILE_SIZE = 10 * 1024 * 1024; // 10MB, plenty for a profile picture
 
-// All app data (the gallery index and the member list) lives in two small
-// JSON files stored in Vercel Blob, not on local disk -- there is no
-// persistent local disk on Vercel. The actual photos/videos/profile pictures
-// are uploaded directly from the browser to Blob storage (see the upload
-// scripts in views/add.ejs and views/profile.ejs), bypassing this server
-// entirely, since Vercel Functions reject request bodies over 4.5MB.
-const METADATA_PATHNAME = 'data/metadata.json';
-const MEMBERS_PATHNAME = 'data/members.json';
+// Every gallery item and every member gets its OWN small JSON blob, instead
+// of one shared index file everyone's requests would have to read-modify-
+// write. That shared-file design lost data under concurrent writes even
+// with conditional-write retries, because Vercel Blob reads (even ones
+// documented to bypass caching) kept returning stale content in testing --
+// a fresh item/member never needs a conditional write at all, since it's a
+// brand-new pathname nothing else can collide with. Edits only risk
+// colliding with another edit of that exact same item/member, which is a
+// far narrower window.
+const ITEMS_PREFIX = 'data/items/';
+const MEMBERS_PREFIX = 'data/members/';
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
@@ -38,73 +41,179 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-async function readJSONBlob(pathname, fallback) {
+function slugify(name) {
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug || 'member';
+}
+
+function memberPathname(name) {
+  return MEMBERS_PREFIX + slugify(name) + '.json';
+}
+
+async function headBlob(pathname) {
   try {
-    const info = await head(pathname);
-    const res = await fetch(info.url);
-    if (!res.ok) {
-      return fallback;
-    }
-    return await res.json();
+    return await head(pathname);
   } catch (err) {
-    if (err instanceof BlobNotFoundError) {
-      return fallback;
+    if (err instanceof BlobNotFoundError || err.name === 'BlobNotFoundError') {
+      return null;
     }
     throw err;
   }
 }
 
-function writeJSONBlob(pathname, data) {
-  return put(pathname, JSON.stringify(data, null, 2), {
+async function fetchBlobJSON(info, fallback) {
+  if (!info) {
+    return fallback;
+  }
+  // A cache-busting query string plus cache: 'no-store' -- belt and
+  // suspenders against getting a stale cached copy right after a write.
+  const cacheBustedUrl = info.url + (info.url.indexOf('?') === -1 ? '?' : '&') + 'cb=' + Date.now();
+  const res = await fetch(cacheBustedUrl, { cache: 'no-store' });
+  if (!res.ok) {
+    return fallback;
+  }
+  return await res.json();
+}
+
+async function readJSONBlob(pathname, fallback) {
+  const info = await headBlob(pathname);
+  return fetchBlobJSON(info, fallback);
+}
+
+function writeJSONBlob(pathname, data, extraOptions) {
+  return put(pathname, JSON.stringify(data, null, 2), Object.assign({
     access: 'public',
     addRandomSuffix: false,
-    allowOverwrite: true,
     contentType: 'application/json'
+  }, extraOptions));
+}
+
+function wait(ms) {
+  return new Promise(function (resolve) {
+    setTimeout(resolve, ms);
   });
 }
 
-function readMetadata() {
-  return readJSONBlob(METADATA_PATHNAME, {});
+function isConflictError(err) {
+  // Checking err.name/message as well as instanceof: errors that cross an
+  // async boundary inside a dependency don't always preserve the exact
+  // class reference, so instanceof alone silently failed to catch these
+  // in testing.
+  return err instanceof BlobPreconditionFailedError || err.name === 'BlobPreconditionFailedError' || err.status === 412 || /precondition/i.test(err.message || '');
 }
 
-function writeMetadata(data) {
-  return writeJSONBlob(METADATA_PATHNAME, data);
-}
-
-function readMembers() {
-  return readJSONBlob(MEMBERS_PATHNAME, []);
-}
-
-function writeMembers(data) {
-  return writeJSONBlob(MEMBERS_PATHNAME, data);
-}
-
-async function addMember(name) {
-  const members = await readMembers();
-  const alreadyMember = members.some(m => m.name.toLowerCase() === name.toLowerCase());
-  if (!alreadyMember) {
-    members.push({ name: name, joinedAt: Date.now(), profilePicture: '' });
-    await writeMembers(members);
+// Only used for editing an existing item/member, where the only possible
+// collision is someone else editing that exact same one at the exact same
+// moment -- a far narrower window than contending over one shared file.
+async function updateJSONBlob(pathname, fallback, updateFn) {
+  const MAX_ATTEMPTS = 8;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const info = await headBlob(pathname);
+    const current = await fetchBlobJSON(info, fallback);
+    const updated = updateFn(current);
+    const options = { allowOverwrite: true };
+    if (info) {
+      options.ifMatch = info.etag;
+    }
+    try {
+      await writeJSONBlob(pathname, updated, options);
+      return updated;
+    } catch (err) {
+      if (isConflictError(err) && attempt < MAX_ATTEMPTS) {
+        await wait(Math.floor(Math.random() * 100 * attempt));
+        continue;
+      }
+      throw err;
+    }
   }
+}
+
+async function listJSONBlobs(prefix) {
+  const { blobs } = await list({ prefix: prefix });
+  const results = await Promise.all(blobs.map(function (b) {
+    const cacheBustedUrl = b.url + (b.url.indexOf('?') === -1 ? '?' : '&') + 'cb=' + Date.now();
+    return fetch(cacheBustedUrl, { cache: 'no-store' })
+      .then(function (res) {
+        return res.ok ? res.json() : null;
+      })
+      .then(function (data) {
+        return { pathname: b.pathname, data: data };
+      })
+      .catch(function () {
+        return { pathname: b.pathname, data: null };
+      });
+  }));
+  return results.filter(function (r) {
+    return r.data;
+  });
+}
+
+async function getMediaItem(id) {
+  return readJSONBlob(ITEMS_PREFIX + id + '.json', null);
+}
+
+async function createMediaItem(entry) {
+  const id = crypto.randomUUID();
+  await writeJSONBlob(ITEMS_PREFIX + id + '.json', entry, { allowOverwrite: false });
+  return id;
+}
+
+function updateMediaItem(id, updateFn) {
+  return updateJSONBlob(ITEMS_PREFIX + id + '.json', null, function (current) {
+    return current ? updateFn(current) : current;
+  });
+}
+
+async function deleteMediaItem(id, item) {
+  try {
+    await del(ITEMS_PREFIX + id + '.json');
+  } catch (err) {
+    // Already gone -- nothing to do.
+  }
+  if (item && item.url) {
+    try {
+      await del(item.url);
+    } catch (err) {
+      // Already gone -- nothing to do.
+    }
+  }
+}
+
+async function listMediaItems() {
+  const entries = await listJSONBlobs(ITEMS_PREFIX);
+  return entries.map(function (entry) {
+    const id = entry.pathname.slice(ITEMS_PREFIX.length, -'.json'.length);
+    return Object.assign({ id: id }, entry.data);
+  });
 }
 
 async function findMember(name) {
   if (!name) {
     return null;
   }
-  const members = await readMembers();
-  return members.find(m => m.name.toLowerCase() === name.toLowerCase()) || null;
+  return readJSONBlob(memberPathname(name), null);
+}
+
+async function addMember(name) {
+  const pathname = memberPathname(name);
+  const existing = await readJSONBlob(pathname, null);
+  if (existing) {
+    return;
+  }
+  try {
+    await writeJSONBlob(pathname, { name: name, joinedAt: Date.now(), profilePicture: '' }, { allowOverwrite: false });
+  } catch (err) {
+    // Someone else joined under this exact name in the tiny gap between our
+    // read and write -- fine, they're a member now either way.
+  }
 }
 
 async function setMemberProfilePicture(name, url) {
-  const members = await readMembers();
-  const member = members.find(m => m.name.toLowerCase() === name.toLowerCase());
-  if (!member) {
-    return;
-  }
-  const oldUrl = member.profilePicture;
-  member.profilePicture = url;
-  await writeMembers(members);
+  let oldUrl = null;
+  await updateJSONBlob(memberPathname(name), { name: name, joinedAt: Date.now(), profilePicture: '' }, function (current) {
+    oldUrl = current.profilePicture || null;
+    return Object.assign({}, current, { profilePicture: url });
+  });
   if (oldUrl) {
     try {
       await del(oldUrl);
@@ -112,6 +221,13 @@ async function setMemberProfilePicture(name, url) {
       // Old picture already gone or unreachable -- nothing to do.
     }
   }
+}
+
+async function listMembers() {
+  const entries = await listJSONBlobs(MEMBERS_PREFIX);
+  return entries.map(function (entry) {
+    return entry.data;
+  });
 }
 
 function canManageItem(item, memberName) {
@@ -126,14 +242,13 @@ function isSiteOwner(req) {
 }
 
 async function getGalleryItems(currentMember, ownerOverride) {
-  const [metadata, members] = await Promise.all([readMetadata(), readMembers()]);
-  return Object.keys(metadata)
-    .map(function (id) {
-      const entry = metadata[id];
+  const [items, members] = await Promise.all([listMediaItems(), listMembers()]);
+  return items
+    .map(function (entry) {
       const addedBy = entry.addedBy || '';
       const uploader = addedBy ? members.find(m => m.name.toLowerCase() === addedBy.toLowerCase()) : null;
       const item = {
-        id: id,
+        id: entry.id,
         url: entry.url,
         type: entry.contentType && entry.contentType.indexOf('video/') === 0 ? 'video' : 'image',
         title: entry.title || '',
@@ -206,24 +321,20 @@ app.post('/api/media', async function (req, res) {
   if (!body.url) {
     return res.status(400).json({ error: 'Missing upload URL.' });
   }
-  const id = crypto.randomUUID();
-  const metadata = await readMetadata();
-  metadata[id] = {
+  const id = await createMediaItem({
     url: body.url,
     contentType: body.contentType || '',
     title: String(body.title || '').trim(),
     description: String(body.description || '').trim(),
     addedBy: req.cookies.memberName || '',
     uploadedAt: Date.now()
-  };
-  await writeMetadata(metadata);
+  });
   res.json({ id: id });
 });
 
 app.get('/edit/:id', async function (req, res) {
   const currentMember = req.cookies.memberName || null;
-  const metadata = await readMetadata();
-  const entry = metadata[req.params.id];
+  const entry = await getMediaItem(req.params.id);
   if (!entry) {
     return res.redirect('/');
   }
@@ -242,37 +353,31 @@ app.get('/edit/:id', async function (req, res) {
 
 app.post('/edit/:id', async function (req, res) {
   const currentMember = req.cookies.memberName || null;
-  const metadata = await readMetadata();
-  const entry = metadata[req.params.id];
+  const entry = await getMediaItem(req.params.id);
   if (!entry) {
     return res.redirect('/');
   }
   if (!canManageItem(entry, currentMember) && !isSiteOwner(req)) {
     return res.redirect('/?error=' + encodeURIComponent('You can only edit items you added.'));
   }
-  entry.title = (req.body.title || '').trim();
-  entry.description = (req.body.description || '').trim();
-  await writeMetadata(metadata);
+  const title = (req.body.title || '').trim();
+  const description = (req.body.description || '').trim();
+  await updateMediaItem(req.params.id, function (current) {
+    return Object.assign({}, current, { title: title, description: description });
+  });
   res.redirect('/');
 });
 
 app.post('/delete/:id', async function (req, res) {
   const currentMember = req.cookies.memberName || null;
-  const metadata = await readMetadata();
-  const entry = metadata[req.params.id];
+  const entry = await getMediaItem(req.params.id);
   if (!entry) {
     return res.redirect('/');
   }
   if (!canManageItem(entry, currentMember) && !isSiteOwner(req)) {
     return res.redirect('/?error=' + encodeURIComponent('You can only delete items you added.'));
   }
-  delete metadata[req.params.id];
-  await writeMetadata(metadata);
-  try {
-    await del(entry.url);
-  } catch (err) {
-    // Already gone -- nothing to do.
-  }
+  await deleteMediaItem(req.params.id, entry);
   res.redirect('/');
 });
 
@@ -291,7 +396,7 @@ app.post('/join', async function (req, res) {
 });
 
 app.get('/members', async function (req, res) {
-  const members = (await readMembers())
+  const members = (await listMembers())
     .slice()
     .sort(function (a, b) {
       return a.joinedAt - b.joinedAt;
