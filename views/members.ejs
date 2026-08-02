@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Members</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <%- include('partials/nav') %>
+  <h1>Members</h1>
+  <% if (members.length === 0) { %>
+    <p class="empty">No one has joined yet. <a href="/join">Be the first!</a></p>
+  <% } else { %>
+    <ul class="members-list">
+      <% members.forEach(function (member) { %>
+        <li>
+          <% if (member.pictureUrl) { %>
+            <img class="avatar" src="<%= member.pictureUrl %>" alt="<%= member.name %>">
+          <% } else { %>
+            <span class="avatar avatar-placeholder"><%= member.name.charAt(0).toUpperCase() %></span>
+          <% } %>
+          <%= member.name %><% if (member.name === currentMember) { %> <span class="you-tag">(you)</span><% } %>
+        </li>
+      <% }); %>
+    </ul>
+  <% } %>
+  <% if (!currentMember) { %>
+    <p><a href="/join">Join the list</a></p>
+  <% } %>
+</body>
+</html>

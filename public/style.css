@@ -1,0 +1,254 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  background: #f4f4f6;
+  color: #1a1a1a;
+}
+
+.nav {
+  display: flex;
+  gap: 1.5rem;
+  padding: 1rem 1.5rem;
+  background: #22223b;
+}
+
+.nav a {
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.nav a:hover {
+  text-decoration: underline;
+}
+
+.nav-spacer {
+  flex: 1;
+}
+
+.nav-member {
+  color: #fff;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+h1 {
+  padding: 0 1.5rem;
+}
+
+.empty {
+  padding: 0 1.5rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+  padding: 1rem 1.5rem 2rem;
+}
+
+.card {
+  background: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  display: flex;
+  flex-direction: column;
+}
+
+.card img,
+.card video {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  display: block;
+}
+
+.caption {
+  padding: 0.6rem 0.8rem;
+}
+
+.caption .title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.caption .description {
+  margin: 0.25rem 0 0;
+  font-size: 0.9rem;
+  color: #555;
+}
+
+.caption .added-by {
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+  color: #888;
+  font-style: italic;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.avatar-small {
+  width: 18px;
+  height: 18px;
+}
+
+.avatar-placeholder {
+  background: #4a4e69;
+  color: #fff;
+  text-align: center;
+  line-height: 24px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-style: normal;
+}
+
+.members-list {
+  padding: 0 1.5rem;
+  list-style: none;
+  margin: 0;
+}
+
+.members-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: #fff;
+  padding: 0.6rem 0.9rem;
+  border-radius: 6px;
+  margin-bottom: 0.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.members-list .avatar {
+  width: 32px;
+  height: 32px;
+}
+
+.members-list .avatar-placeholder {
+  line-height: 32px;
+}
+
+.you-tag {
+  color: #888;
+  font-size: 0.85rem;
+}
+
+.card-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 0.8rem 0.8rem;
+  margin-top: auto;
+}
+
+.card-actions a {
+  color: #22223b;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.card-actions a:hover {
+  text-decoration: underline;
+}
+
+.card-actions form {
+  display: inline;
+}
+
+.delete-btn {
+  background: #b00020;
+  padding: 0.35rem 0.8rem;
+  font-size: 0.85rem;
+}
+
+.delete-btn:hover {
+  background: #8a0018;
+}
+
+.preview {
+  padding: 0 1.5rem;
+}
+
+.preview img,
+.preview video {
+  max-width: 320px;
+  max-height: 320px;
+  border-radius: 8px;
+  display: block;
+}
+
+.cancel-link {
+  color: #22223b;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.cancel-link:hover {
+  text-decoration: underline;
+}
+
+input[type="text"] {
+  padding: 0.5rem 0.7rem;
+  background: #fff;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+}
+
+.form-page {
+  padding: 0 1.5rem;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.form-page .preview {
+  padding: 0;
+  flex-basis: 100%;
+}
+
+.form-page .preview:empty {
+  display: none;
+}
+
+input[type="file"] {
+  padding: 0.5rem;
+  background: #fff;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+}
+
+button {
+  padding: 0.6rem 1.2rem;
+  background: #22223b;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:hover {
+  background: #4a4e69;
+}
+
+.error {
+  margin: 0 1.5rem 1rem;
+  color: #b00020;
+  font-weight: 600;
+}

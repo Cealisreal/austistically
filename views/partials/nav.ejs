@@ -1,0 +1,11 @@
+<nav class="nav">
+  <a href="/">Gallery</a>
+  <a href="/add">Add Photos/Videos</a>
+  <a href="/members">Members</a>
+  <span class="nav-spacer"></span>
+  <% if (currentMember) { %>
+    <a href="/profile" class="nav-member">Hi, <%= currentMember %></a>
+  <% } else { %>
+    <a href="/join">Join</a>
+  <% } %>
+</nav>

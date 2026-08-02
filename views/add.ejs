@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Add Photos/Videos</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <%- include('partials/nav') %>
+  <h1>Add Photos/Videos</h1>
+  <p>Add new photos or videos to the gallery.</p>
+  <% if (error) { %>
+    <p class="error"><%= error %></p>
+  <% } %>
+  <form action="/add" method="POST" enctype="multipart/form-data" class="form-page">
+    <input type="file" name="media" accept="image/*,video/*" id="mediaInput" required>
+    <div id="preview" class="preview"></div>
+    <input type="text" name="title" placeholder="Title (optional)">
+    <input type="text" name="description" placeholder="Description (optional)">
+    <button type="submit">Upload</button>
+  </form>
+  <script>
+    var mediaInput = document.getElementById('mediaInput');
+    var preview = document.getElementById('preview');
+    mediaInput.addEventListener('change', function () {
+      preview.innerHTML = '';
+      var file = mediaInput.files[0];
+      if (!file) {
+        return;
+      }
+      var url = URL.createObjectURL(file);
+      var el;
+      if (file.type.indexOf('video/') === 0) {
+        el = document.createElement('video');
+        el.controls = true;
+      } else {
+        el = document.createElement('img');
+      }
+      el.src = url;
+      preview.appendChild(el);
+    });
+  </script>
+</body>
+</html>

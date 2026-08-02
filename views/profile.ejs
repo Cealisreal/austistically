@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>My Profile</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <%- include('partials/nav') %>
+  <h1>My Profile</h1>
+  <p>Signed in as <strong><%= currentMember %></strong>.</p>
+  <% if (pictureUrl) { %>
+    <div class="preview"><img src="<%= pictureUrl %>" alt="<%= currentMember %>"></div>
+  <% } %>
+  <% if (error) { %>
+    <p class="error"><%= error %></p>
+  <% } %>
+  <form action="/profile" method="POST" enctype="multipart/form-data" class="form-page">
+    <input type="file" name="picture" accept="image/*" required>
+    <button type="submit"><%= pictureUrl ? 'Change Picture' : 'Set Picture' %></button>
+  </form>
+</body>
+</html>

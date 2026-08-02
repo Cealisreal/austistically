@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Join</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <%- include('partials/nav') %>
+  <h1>Join</h1>
+  <% if (currentMember) { %>
+    <p>You're already a member as <strong><%= currentMember %></strong>. Joining again with a different name will switch you to that name on this device.</p>
+  <% } else { %>
+    <p>Type your name to join and get credit for what you add.</p>
+  <% } %>
+  <% if (error) { %>
+    <p class="error"><%= error %></p>
+  <% } %>
+  <form action="/join" method="POST" class="form-page">
+    <input type="text" name="name" placeholder="Your name" required>
+    <button type="submit">Join</button>
+  </form>
+</body>
+</html>
