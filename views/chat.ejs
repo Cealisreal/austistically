@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <%- include('partials/nav') %>
+  <h1>Chat <span class="testers-only-tag">Testers Only</span></h1>
+  <div id="messages" class="chat-messages">
+    <% if (messages.length === 0) { %>
+      <p class="empty" id="emptyState">No messages yet. Say hello!</p>
+    <% } %>
+    <% messages.forEach(function (message) { %>
+      <div class="chat-message<%= message.author === currentMember ? ' chat-message-own' : '' %>" data-id="<%= message.id %>">
+        <div class="chat-message-author"><%= message.author %></div>
+        <div class="chat-message-text"><%= message.text %></div>
+      </div>
+    <% }); %>
+  </div>
+  <p id="status" class="error" hidden></p>
+  <form id="chatForm" class="form-page chat-form">
+    <input type="text" name="text" id="chatInput" placeholder="Type a message..." maxlength="2000" autocomplete="off" required>
+    <button type="submit">Send</button>
+  </form>
+  <script>
+    var currentMember = <%- JSON.stringify(currentMember) %>;
+    var messagesEl = document.getElementById('messages');
+    var form = document.getElementById('chatForm');
+    var input = document.getElementById('chatInput');
+    var status = document.getElementById('status');
+    var knownIds = new Set(Array.from(messagesEl.querySelectorAll('.chat-message')).map(function (el) { return el.dataset.id; }));
+
+    function escapeHtml(text) {
+      var div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function renderMessages(messages) {
+      var empty = document.getElementById('emptyState');
+      if (messages.length > 0 && empty) {
+        empty.remove();
+      }
+      var addedAny = false;
+      messages.forEach(function (message) {
+        if (knownIds.has(message.id)) {
+          return;
+        }
+        knownIds.add(message.id);
+        addedAny = true;
+        var div = document.createElement('div');
+        div.className = 'chat-message' + (message.author === currentMember ? ' chat-message-own' : '');
+        div.dataset.id = message.id;
+        div.innerHTML = '<div class="chat-message-author">' + escapeHtml(message.author) + '</div>' +
+          '<div class="chat-message-text">' + escapeHtml(message.text) + '</div>';
+        messagesEl.appendChild(div);
+      });
+      if (addedAny) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    }
+
+    async function poll() {
+      try {
+        var response = await fetch('/api/chat/messages');
+        if (!response.ok) {
+          return;
+        }
+        var data = await response.json();
+        renderMessages(data.messages || []);
+      } catch (err) {
+        // Quietly skip this poll and try again next time.
+      }
+    }
+
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    setInterval(poll, 4000);
+
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var text = input.value.trim();
+      if (!text) {
+        return;
+      }
+      status.hidden = true;
+      var submitButton = form.querySelector('button[type="submit"]');
+      submitButton.disabled = true;
+      try {
+        var response = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: text })
+        });
+        if (!response.ok) {
+          var data = await response.json().catch(function () { return {}; });
+          throw new Error(data.error || 'Could not send message.');
+        }
+        input.value = '';
+        await poll();
+      } catch (err) {
+        status.textContent = err.message || 'Could not send message.';
+        status.hidden = false;
+      } finally {
+        submitButton.disabled = false;
+        input.focus();
+      }
+    });
+  </script>
+</body>
+</html>

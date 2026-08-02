@@ -20,7 +20,16 @@
           <% } else { %>
             <span class="avatar avatar-placeholder"><%= member.name.charAt(0).toUpperCase() %></span>
           <% } %>
-          <%= member.name %><% if (member.name === currentMember) { %> <span class="you-tag">(you)</span><% } %>
+          <span class="member-name"><%= member.name %><% if (member.name === currentMember) { %> <span class="you-tag">(you)</span><% } %></span>
+          <% if (member.isTester) { %>
+            <span class="tester-tag">Tester</span>
+          <% } %>
+          <% if (isOwner) { %>
+            <form action="/members/<%= encodeURIComponent(member.name) %>/tester" method="POST" class="tester-toggle">
+              <input type="hidden" name="enable" value="<%= member.isTester ? 'false' : 'true' %>">
+              <button type="submit" class="tester-toggle-btn"><%= member.isTester ? 'Remove Tester' : 'Make Tester' %></button>
+            </form>
+          <% } %>
         </li>
       <% }); %>
     </ul>

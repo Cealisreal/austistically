@@ -3,8 +3,9 @@ const cookieParser = require('cookie-parser');
 const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
-const { put, head, del, list, BlobNotFoundError, BlobPreconditionFailedError } = require('@vercel/blob');
+const { put, del, list } = require('@vercel/blob');
 const { handleUpload } = require('@vercel/blob/client');
+const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,17 +22,48 @@ const MEDIA_CONTENT_TYPES = IMAGE_CONTENT_TYPES.concat(VIDEO_CONTENT_TYPES);
 const MAX_MEDIA_SIZE = 500 * 1024 * 1024; // 500MB, generous for phone videos
 const MAX_PROFILE_SIZE = 10 * 1024 * 1024; // 10MB, plenty for a profile picture
 
-// Every gallery item and every member gets its OWN small JSON blob, instead
-// of one shared index file everyone's requests would have to read-modify-
-// write. That shared-file design lost data under concurrent writes even
-// with conditional-write retries, because Vercel Blob reads (even ones
-// documented to bypass caching) kept returning stale content in testing --
-// a fresh item/member never needs a conditional write at all, since it's a
-// brand-new pathname nothing else can collide with. Edits only risk
-// colliding with another edit of that exact same item/member, which is a
-// far narrower window.
+// Every gallery item, member, and chat message gets its own small JSON blob
+// in Vercel Blob rather than a shared index file, since a shared file that
+// every request rewrites lost data under concurrent writes (see git log).
+//
+// Editing an existing entity (title/description, profile picture, tester
+// flag) never overwrites its file in place either. Overwriting a blob at
+// the same pathname kept serving stale content on reads afterward, even
+// through options specifically documented to guarantee a fresh read --
+// confirmed by testing that a brand-new pathname is always readable
+// immediately, while an overwritten one wasn't reliably. So an "edit" here
+// means: write the new state to a new pathname inside that entity's own
+// folder, then read the entity by listing its folder and taking the
+// newest file. New pathnames need no conflict handling at all -- there's
+// nothing to collide with -- which also means the conditional-write-with-
+// retry logic from before is gone; it's no longer necessary.
 const ITEMS_PREFIX = 'data/items/';
 const MEMBERS_PREFIX = 'data/members/';
+const CHAT_PREFIX = 'data/chat/';
+const SUPPORT_PREFIX = 'data/support/';
+
+// Set ANTHROPIC_API_KEY (an API key from console.anthropic.com) to enable
+// the Support page's AI assistant. Constructed lazily so a missing/invalid
+// key only breaks that one feature instead of crashing the whole server.
+let anthropicClient = null;
+function getAnthropicClient() {
+  if (!anthropicClient) {
+    anthropicClient = new Anthropic();
+  }
+  return anthropicClient;
+}
+
+const SUPPORT_SYSTEM_PROMPT = [
+  'You are a friendly, concise support assistant built into "Autistically" --',
+  'a small home/private photo and video gallery web app. Members join with',
+  'just a name (no password), upload photos and videos, edit or delete their',
+  'own uploads, set a profile picture, and -- if promoted by the owner -- use',
+  'a group chat with other members. Help people troubleshoot bugs, explain',
+  'how a feature works, and suggest next steps. If something sounds like it',
+  'needs the site owner directly (data loss, a broken deploy, account',
+  'access), say so plainly and suggest they contact the owner. Keep replies',
+  'short and practical -- a few sentences unless real detail is needed.'
+].join(' ');
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
@@ -46,38 +78,16 @@ function slugify(name) {
   return slug || 'member';
 }
 
-function memberPathname(name) {
-  return MEMBERS_PREFIX + slugify(name) + '.json';
+function itemFolder(id) {
+  return ITEMS_PREFIX + id + '/';
 }
 
-async function headBlob(pathname) {
-  try {
-    return await head(pathname);
-  } catch (err) {
-    if (err instanceof BlobNotFoundError || err.name === 'BlobNotFoundError') {
-      return null;
-    }
-    throw err;
-  }
+function memberFolder(name) {
+  return MEMBERS_PREFIX + slugify(name) + '/';
 }
 
-async function fetchBlobJSON(info, fallback) {
-  if (!info) {
-    return fallback;
-  }
-  // A cache-busting query string plus cache: 'no-store' -- belt and
-  // suspenders against getting a stale cached copy right after a write.
-  const cacheBustedUrl = info.url + (info.url.indexOf('?') === -1 ? '?' : '&') + 'cb=' + Date.now();
-  const res = await fetch(cacheBustedUrl, { cache: 'no-store' });
-  if (!res.ok) {
-    return fallback;
-  }
-  return await res.json();
-}
-
-async function readJSONBlob(pathname, fallback) {
-  const info = await headBlob(pathname);
-  return fetchBlobJSON(info, fallback);
+function versionFilename() {
+  return Date.now() + '-' + crypto.randomUUID().slice(0, 8) + '.json';
 }
 
 function writeJSONBlob(pathname, data, extraOptions) {
@@ -88,60 +98,57 @@ function writeJSONBlob(pathname, data, extraOptions) {
   }, extraOptions));
 }
 
-function wait(ms) {
-  return new Promise(function (resolve) {
-    setTimeout(resolve, ms);
-  });
+async function fetchJSON(url) {
+  // A cache-busting query string plus cache: 'no-store' -- belt and
+  // suspenders, though the real fix is never re-fetching a pathname whose
+  // content has changed (see comment above).
+  const cacheBustedUrl = url + (url.indexOf('?') === -1 ? '?' : '&') + 'cb=' + Date.now();
+  const res = await fetch(cacheBustedUrl, { cache: 'no-store' });
+  return res.ok ? res.json() : null;
 }
 
-function isConflictError(err) {
-  // Checking err.name/message as well as instanceof: errors that cross an
-  // async boundary inside a dependency don't always preserve the exact
-  // class reference, so instanceof alone silently failed to catch these
-  // in testing.
-  return err instanceof BlobPreconditionFailedError || err.name === 'BlobPreconditionFailedError' || err.status === 412 || /precondition/i.test(err.message || '');
-}
-
-// Only used for editing an existing item/member, where the only possible
-// collision is someone else editing that exact same one at the exact same
-// moment -- a far narrower window than contending over one shared file.
-async function updateJSONBlob(pathname, fallback, updateFn) {
-  const MAX_ATTEMPTS = 8;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const info = await headBlob(pathname);
-    const current = await fetchBlobJSON(info, fallback);
-    const updated = updateFn(current);
-    const options = { allowOverwrite: true };
-    if (info) {
-      options.ifMatch = info.etag;
-    }
-    try {
-      await writeJSONBlob(pathname, updated, options);
-      return updated;
-    } catch (err) {
-      if (isConflictError(err) && attempt < MAX_ATTEMPTS) {
-        await wait(Math.floor(Math.random() * 100 * attempt));
-        continue;
-      }
-      throw err;
-    }
+// Returns { pathname, data } for the newest file in a folder, or null if
+// the folder is empty/doesn't exist yet.
+async function getLatestInFolder(folder) {
+  const { blobs } = await list({ prefix: folder });
+  if (blobs.length === 0) {
+    return null;
   }
+  blobs.sort(function (a, b) {
+    if (a.pathname < b.pathname) return 1;
+    if (a.pathname > b.pathname) return -1;
+    return 0;
+  });
+  const latest = blobs[0];
+  const data = await fetchJSON(latest.url);
+  return data ? { pathname: latest.pathname, url: latest.url, data: data } : null;
+}
+
+// Best-effort cleanup of superseded versions after writing a new one --
+// not required for correctness (reads always pick the newest file), just
+// keeps the store tidy.
+async function pruneFolderExcept(folder, keepPathname) {
+  const { blobs } = await list({ prefix: folder });
+  const stale = blobs.filter(function (b) {
+    return b.pathname !== keepPathname;
+  });
+  await Promise.all(stale.map(function (b) {
+    return del(b.url).catch(function () {});
+  }));
+}
+
+async function writeNewVersion(folder, data) {
+  const pathname = folder + versionFilename();
+  await writeJSONBlob(pathname, data, { allowOverwrite: false });
+  return pathname;
 }
 
 async function listJSONBlobs(prefix) {
   const { blobs } = await list({ prefix: prefix });
   const results = await Promise.all(blobs.map(function (b) {
-    const cacheBustedUrl = b.url + (b.url.indexOf('?') === -1 ? '?' : '&') + 'cb=' + Date.now();
-    return fetch(cacheBustedUrl, { cache: 'no-store' })
-      .then(function (res) {
-        return res.ok ? res.json() : null;
-      })
-      .then(function (data) {
-        return { pathname: b.pathname, data: data };
-      })
-      .catch(function () {
-        return { pathname: b.pathname, data: null };
-      });
+    return fetchJSON(b.url).then(function (data) {
+      return { pathname: b.pathname, data: data };
+    });
   }));
   return results.filter(function (r) {
     return r.data;
@@ -149,27 +156,33 @@ async function listJSONBlobs(prefix) {
 }
 
 async function getMediaItem(id) {
-  return readJSONBlob(ITEMS_PREFIX + id + '.json', null);
+  const latest = await getLatestInFolder(itemFolder(id));
+  return latest ? latest.data : null;
 }
 
 async function createMediaItem(entry) {
   const id = crypto.randomUUID();
-  await writeJSONBlob(ITEMS_PREFIX + id + '.json', entry, { allowOverwrite: false });
+  await writeNewVersion(itemFolder(id), entry);
   return id;
 }
 
-function updateMediaItem(id, updateFn) {
-  return updateJSONBlob(ITEMS_PREFIX + id + '.json', null, function (current) {
-    return current ? updateFn(current) : current;
-  });
+async function updateMediaItem(id, updateFn) {
+  const folder = itemFolder(id);
+  const latest = await getLatestInFolder(folder);
+  if (!latest) {
+    return null;
+  }
+  const updated = updateFn(latest.data);
+  const newPathname = await writeNewVersion(folder, updated);
+  await pruneFolderExcept(folder, newPathname);
+  return updated;
 }
 
 async function deleteMediaItem(id, item) {
-  try {
-    await del(ITEMS_PREFIX + id + '.json');
-  } catch (err) {
-    // Already gone -- nothing to do.
-  }
+  const { blobs } = await list({ prefix: itemFolder(id) });
+  await Promise.all(blobs.map(function (b) {
+    return del(b.url).catch(function () {});
+  }));
   if (item && item.url) {
     try {
       await del(item.url);
@@ -180,28 +193,34 @@ async function deleteMediaItem(id, item) {
 }
 
 async function listMediaItems() {
-  const entries = await listJSONBlobs(ITEMS_PREFIX);
-  return entries.map(function (entry) {
-    const id = entry.pathname.slice(ITEMS_PREFIX.length, -'.json'.length);
-    return Object.assign({ id: id }, entry.data);
-  });
+  const { folders } = await list({ prefix: ITEMS_PREFIX, mode: 'folded' });
+  const items = await Promise.all(folders.map(async function (folder) {
+    const latest = await getLatestInFolder(folder);
+    if (!latest) {
+      return null;
+    }
+    const id = folder.slice(ITEMS_PREFIX.length).replace(/\/$/, '');
+    return Object.assign({ id: id }, latest.data);
+  }));
+  return items.filter(Boolean);
 }
 
 async function findMember(name) {
   if (!name) {
     return null;
   }
-  return readJSONBlob(memberPathname(name), null);
+  const latest = await getLatestInFolder(memberFolder(name));
+  return latest ? latest.data : null;
 }
 
 async function addMember(name) {
-  const pathname = memberPathname(name);
-  const existing = await readJSONBlob(pathname, null);
+  const folder = memberFolder(name);
+  const existing = await getLatestInFolder(folder);
   if (existing) {
     return;
   }
   try {
-    await writeJSONBlob(pathname, { name: name, joinedAt: Date.now(), profilePicture: '' }, { allowOverwrite: false });
+    await writeNewVersion(folder, { name: name, joinedAt: Date.now(), profilePicture: '', isTester: false });
   } catch (err) {
     // Someone else joined under this exact name in the tiny gap between our
     // read and write -- fine, they're a member now either way.
@@ -209,11 +228,13 @@ async function addMember(name) {
 }
 
 async function setMemberProfilePicture(name, url) {
-  let oldUrl = null;
-  await updateJSONBlob(memberPathname(name), { name: name, joinedAt: Date.now(), profilePicture: '' }, function (current) {
-    oldUrl = current.profilePicture || null;
-    return Object.assign({}, current, { profilePicture: url });
-  });
+  const folder = memberFolder(name);
+  const existing = await getLatestInFolder(folder);
+  const current = existing ? existing.data : { name: name, joinedAt: Date.now(), profilePicture: '', isTester: false };
+  const oldUrl = current.profilePicture || null;
+  const updated = Object.assign({}, current, { profilePicture: url });
+  const newPathname = await writeNewVersion(folder, updated);
+  await pruneFolderExcept(folder, newPathname);
   if (oldUrl) {
     try {
       await del(oldUrl);
@@ -223,11 +244,61 @@ async function setMemberProfilePicture(name, url) {
   }
 }
 
+async function setMemberTester(name, isTester) {
+  const folder = memberFolder(name);
+  const existing = await getLatestInFolder(folder);
+  if (!existing) {
+    return;
+  }
+  const updated = Object.assign({}, existing.data, { isTester: !!isTester });
+  const newPathname = await writeNewVersion(folder, updated);
+  await pruneFolderExcept(folder, newPathname);
+}
+
 async function listMembers() {
-  const entries = await listJSONBlobs(MEMBERS_PREFIX);
-  return entries.map(function (entry) {
-    return entry.data;
-  });
+  const { folders } = await list({ prefix: MEMBERS_PREFIX, mode: 'folded' });
+  const members = await Promise.all(folders.map(async function (folder) {
+    const latest = await getLatestInFolder(folder);
+    return latest ? latest.data : null;
+  }));
+  return members.filter(Boolean);
+}
+
+async function createChatMessage(entry) {
+  const id = crypto.randomUUID();
+  await writeJSONBlob(CHAT_PREFIX + id + '.json', entry, { allowOverwrite: false });
+  return id;
+}
+
+async function listChatMessages() {
+  const entries = await listJSONBlobs(CHAT_PREFIX);
+  return entries
+    .map(function (entry) {
+      const id = entry.pathname.slice(CHAT_PREFIX.length, -'.json'.length);
+      return Object.assign({ id: id }, entry.data);
+    })
+    .sort(function (a, b) {
+      return (a.postedAt || 0) - (b.postedAt || 0);
+    });
+}
+
+function supportFolder(name) {
+  return SUPPORT_PREFIX + slugify(name) + '/';
+}
+
+async function listSupportMessages(name) {
+  const entries = await listJSONBlobs(supportFolder(name));
+  return entries
+    .map(function (entry) {
+      return entry.data;
+    })
+    .sort(function (a, b) {
+      return (a.postedAt || 0) - (b.postedAt || 0);
+    });
+}
+
+function saveSupportMessage(name, entry) {
+  return writeJSONBlob(supportFolder(name) + crypto.randomUUID() + '.json', entry, { allowOverwrite: false });
 }
 
 function canManageItem(item, memberName) {
@@ -239,6 +310,21 @@ function canManageItem(item, memberName) {
 
 function isSiteOwner(req) {
   return !!OWNER_KEY && req.cookies.ownerKey === OWNER_KEY;
+}
+
+// Testers are members the owner has manually flagged (see the toggle on
+// /members) -- there's no separate key/cookie for it, tester status is
+// just read off the member's own record each time. The owner always
+// counts as a tester too, so they're never locked out of the chat page.
+async function getAccessFlags(req) {
+  const currentMember = req.cookies.memberName || null;
+  const owner = isSiteOwner(req);
+  let tester = owner;
+  if (!tester && currentMember) {
+    const member = await findMember(currentMember);
+    tester = !!(member && member.isTester);
+  }
+  return { currentMember: currentMember, isOwner: owner, isTester: tester };
 }
 
 async function getGalleryItems(currentMember, ownerOverride) {
@@ -278,13 +364,13 @@ function getLanIP() {
 }
 
 app.get('/', async function (req, res) {
-  const currentMember = req.cookies.memberName || null;
-  const items = await getGalleryItems(currentMember, isSiteOwner(req));
-  res.render('gallery', { items: items, currentMember: currentMember, isOwner: isSiteOwner(req), error: req.query.error || null });
+  const access = await getAccessFlags(req);
+  const items = await getGalleryItems(access.currentMember, access.isOwner);
+  res.render('gallery', Object.assign({ items: items, error: req.query.error || null }, access));
 });
 
-app.get('/add', function (req, res) {
-  res.render('add', { currentMember: req.cookies.memberName || null, isOwner: isSiteOwner(req) });
+app.get('/add', async function (req, res) {
+  res.render('add', await getAccessFlags(req));
 });
 
 // Called by the browser (see views/add.ejs) before it uploads a file
@@ -333,32 +419,30 @@ app.post('/api/media', async function (req, res) {
 });
 
 app.get('/edit/:id', async function (req, res) {
-  const currentMember = req.cookies.memberName || null;
+  const access = await getAccessFlags(req);
   const entry = await getMediaItem(req.params.id);
   if (!entry) {
     return res.redirect('/');
   }
-  if (!canManageItem(entry, currentMember) && !isSiteOwner(req)) {
+  if (!canManageItem(entry, access.currentMember) && !access.isOwner) {
     return res.redirect('/?error=' + encodeURIComponent('You can only edit items you added.'));
   }
-  res.render('edit', {
+  res.render('edit', Object.assign({
     id: req.params.id,
     url: entry.url,
     type: entry.contentType && entry.contentType.indexOf('video/') === 0 ? 'video' : 'image',
     title: entry.title || '',
-    description: entry.description || '',
-    currentMember: currentMember,
-    isOwner: isSiteOwner(req)
-  });
+    description: entry.description || ''
+  }, access));
 });
 
 app.post('/edit/:id', async function (req, res) {
-  const currentMember = req.cookies.memberName || null;
+  const access = await getAccessFlags(req);
   const entry = await getMediaItem(req.params.id);
   if (!entry) {
     return res.redirect('/');
   }
-  if (!canManageItem(entry, currentMember) && !isSiteOwner(req)) {
+  if (!canManageItem(entry, access.currentMember) && !access.isOwner) {
     return res.redirect('/?error=' + encodeURIComponent('You can only edit items you added.'));
   }
   const title = (req.body.title || '').trim();
@@ -370,26 +454,26 @@ app.post('/edit/:id', async function (req, res) {
 });
 
 app.post('/delete/:id', async function (req, res) {
-  const currentMember = req.cookies.memberName || null;
+  const access = await getAccessFlags(req);
   const entry = await getMediaItem(req.params.id);
   if (!entry) {
     return res.redirect('/');
   }
-  if (!canManageItem(entry, currentMember) && !isSiteOwner(req)) {
+  if (!canManageItem(entry, access.currentMember) && !access.isOwner) {
     return res.redirect('/?error=' + encodeURIComponent('You can only delete items you added.'));
   }
   await deleteMediaItem(req.params.id, entry);
   res.redirect('/');
 });
 
-app.get('/join', function (req, res) {
-  res.render('join', { error: null, currentMember: req.cookies.memberName || null, isOwner: isSiteOwner(req) });
+app.get('/join', async function (req, res) {
+  res.render('join', Object.assign({ error: null }, await getAccessFlags(req)));
 });
 
 app.post('/join', async function (req, res) {
   const name = (req.body.name || '').trim();
   if (!name) {
-    return res.render('join', { error: 'Please enter a name.', currentMember: req.cookies.memberName || null, isOwner: isSiteOwner(req) });
+    return res.render('join', Object.assign({ error: 'Please enter a name.' }, await getAccessFlags(req)));
   }
   await addMember(name);
   res.cookie('memberName', name, { maxAge: MEMBER_COOKIE_MAX_AGE });
@@ -397,28 +481,35 @@ app.post('/join', async function (req, res) {
 });
 
 app.get('/members', async function (req, res) {
+  const access = await getAccessFlags(req);
   const members = (await listMembers())
     .slice()
     .sort(function (a, b) {
       return a.joinedAt - b.joinedAt;
     })
     .map(function (m) {
-      return { name: m.name, pictureUrl: m.profilePicture || '' };
+      return { name: m.name, pictureUrl: m.profilePicture || '', isTester: !!m.isTester };
     });
-  res.render('members', { members: members, currentMember: req.cookies.memberName || null, isOwner: isSiteOwner(req) });
+  res.render('members', Object.assign({ members: members }, access));
+});
+
+app.post('/members/:name/tester', async function (req, res) {
+  if (!isSiteOwner(req)) {
+    return res.status(403).send('Only the owner can do that.');
+  }
+  await setMemberTester(req.params.name, req.body.enable === 'true');
+  res.redirect('/members');
 });
 
 app.get('/profile', async function (req, res) {
-  const currentMember = req.cookies.memberName || null;
-  if (!currentMember) {
+  const access = await getAccessFlags(req);
+  if (!access.currentMember) {
     return res.redirect('/join');
   }
-  const member = await findMember(currentMember);
-  res.render('profile', {
-    currentMember: currentMember,
-    pictureUrl: member && member.profilePicture ? member.profilePicture : '',
-    isOwner: isSiteOwner(req)
-  });
+  const member = await findMember(access.currentMember);
+  res.render('profile', Object.assign({
+    pictureUrl: member && member.profilePicture ? member.profilePicture : ''
+  }, access));
 });
 
 app.post('/api/profile-upload-token', async function (req, res) {
@@ -456,6 +547,101 @@ app.post('/api/profile-picture', async function (req, res) {
   }
   await setMemberProfilePicture(currentMember, url);
   res.json({ ok: true });
+});
+
+app.get('/chat', async function (req, res) {
+  const access = await getAccessFlags(req);
+  if (!access.isTester) {
+    return res.redirect('/?error=' + encodeURIComponent('Chat is for testers only.'));
+  }
+  const messages = await listChatMessages();
+  res.render('chat', Object.assign({ messages: messages }, access));
+});
+
+// Polled by views/chat.ejs every few seconds to pick up new messages.
+app.get('/api/chat/messages', async function (req, res) {
+  const access = await getAccessFlags(req);
+  if (!access.isTester) {
+    return res.status(403).json({ error: 'Testers only.' });
+  }
+  const messages = await listChatMessages();
+  res.json({ messages: messages });
+});
+
+app.post('/chat', async function (req, res) {
+  const access = await getAccessFlags(req);
+  if (!access.isTester) {
+    return res.status(403).json({ error: 'Testers only.' });
+  }
+  const author = access.currentMember || (access.isOwner ? 'Owner' : null);
+  if (!author) {
+    return res.status(400).json({ error: 'Join first so your messages have a name.' });
+  }
+  const text = String((req.body && req.body.text) || '').trim();
+  if (!text) {
+    return res.status(400).json({ error: 'Message is empty.' });
+  }
+  if (text.length > 2000) {
+    return res.status(400).json({ error: 'Message is too long.' });
+  }
+  const id = await createChatMessage({ author: author, text: text, postedAt: Date.now() });
+  res.json({ id: id });
+});
+
+app.get('/support', async function (req, res) {
+  const access = await getAccessFlags(req);
+  if (!access.currentMember) {
+    return res.redirect('/join');
+  }
+  const messages = await listSupportMessages(access.currentMember);
+  res.render('support', Object.assign({ messages: messages }, access));
+});
+
+app.post('/support', async function (req, res) {
+  const access = await getAccessFlags(req);
+  if (!access.currentMember) {
+    return res.status(401).json({ error: 'Join first.' });
+  }
+  const text = String((req.body && req.body.text) || '').trim();
+  if (!text) {
+    return res.status(400).json({ error: 'Message is empty.' });
+  }
+  if (text.length > 4000) {
+    return res.status(400).json({ error: 'Message is too long.' });
+  }
+
+  await saveSupportMessage(access.currentMember, { role: 'user', text: text, postedAt: Date.now() });
+
+  const history = await listSupportMessages(access.currentMember);
+  const claudeMessages = history.map(function (m) {
+    return { role: m.role === 'assistant' ? 'assistant' : 'user', content: m.text };
+  });
+
+  let replyText;
+  try {
+    const response = await getAnthropicClient().messages.create({
+      model: 'claude-opus-5',
+      max_tokens: 2048,
+      output_config: { effort: 'medium' },
+      system: SUPPORT_SYSTEM_PROMPT,
+      messages: claudeMessages
+    });
+    if (response.stop_reason === 'refusal') {
+      replyText = "I can't help with that particular request, sorry -- try rephrasing or describing the bug differently.";
+    } else {
+      const textBlock = response.content.find(function (block) {
+        return block.type === 'text';
+      });
+      replyText = textBlock ? textBlock.text : "Sorry, I didn't get a usable response. Please try again.";
+    }
+  } catch (err) {
+    console.error(err);
+    replyText = 'Sorry, the support assistant is temporarily unavailable. Please try again in a moment.';
+  }
+
+  await saveSupportMessage(access.currentMember, { role: 'assistant', text: replyText, postedAt: Date.now() });
+
+  res.json({ reply: replyText });
 });
 
 app.get('/owner', function (req, res) {

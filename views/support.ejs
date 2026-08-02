@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Support</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <%- include('partials/nav') %>
+  <h1><span class="support-icon" aria-hidden="true">🩹</span> Support</h1>
+  <p>Ask about a bug or how something works -- an AI assistant answers, just for you.</p>
+  <div id="messages" class="chat-messages">
+    <% if (messages.length === 0) { %>
+      <p class="empty" id="emptyState">No messages yet. Describe what's going wrong and I'll help.</p>
+    <% } %>
+    <% messages.forEach(function (message) { %>
+      <div class="chat-message<%= message.role === 'user' ? ' chat-message-own' : '' %>">
+        <div class="chat-message-author"><%= message.role === 'user' ? currentMember : 'Support' %></div>
+        <div class="chat-message-text"><%= message.text %></div>
+      </div>
+    <% }); %>
+  </div>
+  <p id="status" class="error" hidden></p>
+  <form id="supportForm" class="form-page chat-form">
+    <input type="text" name="text" id="supportInput" placeholder="Describe the bug or ask a question..." maxlength="4000" autocomplete="off" required>
+    <button type="submit" id="submitButton">Send</button>
+  </form>
+  <script>
+    var messagesEl = document.getElementById('messages');
+    var form = document.getElementById('supportForm');
+    var input = document.getElementById('supportInput');
+    var status = document.getElementById('status');
+    var submitButton = document.getElementById('submitButton');
+    var currentMember = <%- JSON.stringify(currentMember) %>;
+
+    function escapeHtml(text) {
+      var div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function appendMessage(author, text, isOwn) {
+      var empty = document.getElementById('emptyState');
+      if (empty) {
+        empty.remove();
+      }
+      var div = document.createElement('div');
+      div.className = 'chat-message' + (isOwn ? ' chat-message-own' : '');
+      div.innerHTML = '<div class="chat-message-author">' + escapeHtml(author) + '</div>' +
+        '<div class="chat-message-text">' + escapeHtml(text) + '</div>';
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return div;
+    }
+
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var text = input.value.trim();
+      if (!text) {
+        return;
+      }
+      status.hidden = true;
+      input.disabled = true;
+      submitButton.disabled = true;
+
+      appendMessage(currentMember, text, true);
+      input.value = '';
+
+      var typingEl = appendMessage('Support', 'Thinking...', false);
+      typingEl.classList.add('chat-message-typing');
+
+      try {
+        var response = await fetch('/support', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: text })
+        });
+        var data = await response.json().catch(function () { return {}; });
+        typingEl.remove();
+        if (!response.ok) {
+          throw new Error(data.error || 'Could not reach the support assistant.');
+        }
+        appendMessage('Support', data.reply, false);
+      } catch (err) {
+        typingEl.remove();
+        status.textContent = err.message || 'Could not reach the support assistant.';
+        status.hidden = false;
+      } finally {
+        input.disabled = false;
+        submitButton.disabled = false;
+        input.focus();
+      }
+    });
+  </script>
+</body>
+</html>
